@@ -12,13 +12,13 @@ from datetime import datetime
 
 bridge = CvBridge()
 
-def process_oak():
+def process_oak(points):
     ###################
     #TODO task1
     return points
 
 
-def process_ouster():
+def process_ouster(points):
     ####################
     #TODO task2
     return points
