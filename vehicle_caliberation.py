@@ -37,7 +37,7 @@ def segment_ground_ransac(lidar_pc):
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(lidar_pc[:, :3])
 
-    plane_model, inliers = pcd.segment_plane(distance_threshold=0.05, 
+    plane_model, inliers = pcd.segment_plane(distance_threshold=0.03, 
                                              ransac_n=3, 
                                              num_iterations=1000)
 
