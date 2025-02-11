@@ -114,13 +114,20 @@ def process_oak(color_img_path, depth_img_path):
                 points.append([X, Y, z])
                 colors.append(color_img[y, x] / 255.0)
                 
-    non_ground_pcd = o3d.geometry.PointCloud()
-    non_ground_pcd.points = o3d.utility.Vector3dVector(points[:, :3])
-    non_ground_pcd.paint_uniform_color([0, 1, 0])  # Green for non-ground
 
-    o3d.visualization.draw_geometries([points])
+    
+    #filtered_pc  = filter_lidar_points(lidar_pc, max_distance, min_distance)
+                
+    pcd = o3d.geometry.PointCloud()
+    if points:
+        pcd.points = o3d.utility.Vector3dVector(np.array(points))
+        pcd.colors = o3d.utility.Vector3dVector(np.array(colors))
+    
+    
+    #pcd  = filter_lidar_points(pcd, MAX_DISTANCE_METERS, MIN_DISTANCE_METERS)
+    o3d.visualization.draw_geometries([pcd])
 
-    return points
+    return pcd
 
 def process_ouster(points):
     ####################
@@ -132,7 +139,7 @@ def process_ouster(points):
     ground_pc, non_ground_pc , plane_model = segment_ground_ransac(filtered_pc)
 
     print("Computing height from ground...")
-    heights = compute_heights(lidar_pc, plane_model)
+    heights = compute_heights(points, plane_model)
 
     print("height of road", heights)
 
