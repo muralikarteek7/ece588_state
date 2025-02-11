@@ -113,6 +113,12 @@ def process_oak(color_img_path, depth_img_path):
                 Y = (y - cy) * z / fy
                 points.append([X, Y, z])
                 colors.append(color_img[y, x] / 255.0)
+                
+    non_ground_pcd = o3d.geometry.PointCloud()
+    non_ground_pcd.points = o3d.utility.Vector3dVector(points[:, :3])
+    non_ground_pcd.paint_uniform_color([0, 1, 0])  # Green for non-ground
+
+    o3d.visualization.draw_geometries([points])
 
     return points
 
@@ -133,7 +139,7 @@ def process_ouster(points):
 
     print(f"Ground points: {ground_pc.shape[0]}, Non-ground points: {non_ground_pc.shape[0]}")
     
-    visualize_point_clouds( non_ground_pc)
+    
 
 
     return non_ground_pc
@@ -193,17 +199,20 @@ def main():
     for index in range(1,2):
         lidar_path = os.path.join(folder, f'lidar{index}.npz')
         depth_path = os.path.join(folder, f'depth{index}.tif')
+        color_path = os.path.join(folder, f'color{index}.png')
         
         print("Waiting for camera info")
         camera_info_msg = rospy.wait_for_message("/oak/stereo/camera_info", CameraInfo)
         print("Camera info received")
         
+
+        color_img = cv2.imread(color_path, cv2.IMREAD_UNCHANGED)
         depth_img = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
         cam_pc = depth_to_point_cloud(depth_img, camera_info_msg)
         data = np.load(lidar_path)
         lidar_pc = data['arr_0']
 
-        cam_pc = process_oak(cam_pc)
+        cam_pc = process_oak(color_path,depth_path )
         lidar_pc = process_ouster(lidar_pc)
         
         #visualize_point_clouds(lidar_pc, cam_pc)
