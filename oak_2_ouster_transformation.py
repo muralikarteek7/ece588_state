@@ -72,20 +72,17 @@ def visualize_point_clouds(ground_pc, non_ground_pc):
 
     o3d.visualization.draw_geometries([ground_pcd, non_ground_pcd])
 
+def process_oak(color_img_path, depth_img_path, max_distance=2.0):
 
-def process_oak(color_img_path, depth_img_path):
     color_img = cv2.imread(color_img_path)
     color_img = cv2.cvtColor(color_img, cv2.COLOR_BGR2RGB)
 
     hsv = cv2.cvtColor(color_img, cv2.COLOR_RGB2HSV)
-
     lower_bound = np.array([98, 43, 0])
     upper_bound = np.array([118, 143, 94])
-
     mask = cv2.inRange(hsv, lower_bound, upper_bound)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
     largest_contour = max(contours, key=cv2.contourArea) if contours else None
 
     box_mask = np.zeros_like(mask, dtype=np.uint8)
@@ -111,23 +108,46 @@ def process_oak(color_img_path, depth_img_path):
                 z = d * 0.1
                 X = (x - cx) * z / fx
                 Y = (y - cy) * z / fy
-                points.append([X, Y, z])
-                colors.append(color_img[y, x] / 255.0)
                 
+                distance = np.sqrt(X**2 )  # Euclidean distance
 
+                if distance <= 6.35 and distance >= 5: # Filter by max distance
+                    points.append([X, Y, z])
+                    colors.append(color_img[y, x] / 255.0)
+                    print("hi")
     
-    #filtered_pc  = filter_lidar_points(lidar_pc, max_distance, min_distance)
-                
     pcd = o3d.geometry.PointCloud()
     if points:
         pcd.points = o3d.utility.Vector3dVector(np.array(points))
         pcd.colors = o3d.utility.Vector3dVector(np.array(colors))
-    
-    
-    #pcd  = filter_lidar_points(pcd, MAX_DISTANCE_METERS, MIN_DISTANCE_METERS)
+
     o3d.visualization.draw_geometries([pcd])
 
-    return pcd
+    return points
+
+
+
+def filter_point_cloud(cam_pc, min_distance_meters, max_distance_meters):
+    """
+    Filters the point cloud based on distance range.
+
+    Args:
+        cam_pc (np.ndarray): Nx3 array containing (x, y, z) coordinates of the point cloud.
+        min_distance_meters (float): Minimum distance threshold.
+        max_distance_meters (float): Maximum distance threshold.
+
+    Returns:
+        np.ndarray: Filtered point cloud.
+    """
+    # Compute Euclidean distance of each point
+    distances = np.linalg.norm(cam_pc, axis=1)
+    
+    # Apply distance filter
+    mask = (distances >= min_distance_meters) & (distances <= max_distance_meters)
+    
+    return cam_pc[mask]
+
+
 
 def process_ouster(points):
     ####################
@@ -168,6 +188,18 @@ def depth_to_point_cloud(depth_img, camera_info):
                 points.append([x * depth, y * depth, depth])
 
     return np.array(points)
+
+def visualize_point_cloud(points):
+    """
+    Visualizes the given point cloud using Open3D.
+
+    Args:
+        points (np.ndarray): Nx3 array of point cloud coordinates.
+    """
+    pc = o3d.geometry.PointCloud()
+    pc.points = o3d.utility.Vector3dVector(points)
+    pc.paint_uniform_color([0.1, 0.7, 0.9])  # Light blue color
+    o3d.visualization.draw_geometries([pc])
 
 def visualize_point_clouds(lidar_pc, cam_pc):
     source = o3d.geometry.PointCloud()
@@ -216,14 +248,21 @@ def main():
         color_img = cv2.imread(color_path, cv2.IMREAD_UNCHANGED)
         depth_img = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
         cam_pc = depth_to_point_cloud(depth_img, camera_info_msg)
+
+        filtered_pc = filter_point_cloud(cam_pc, MIN_DISTANCE_METERS-0.5, MAX_DISTANCE_METERS + 0.5)
+
         data = np.load(lidar_path)
         lidar_pc = data['arr_0']
 
-        cam_pc = process_oak(color_path,depth_path )
+        visualize_point_cloud(filtered_pc)
+        visualize_point_clouds(filtered_pc, cam_pc)
+
+        #cam_pc = process_oak(color_path,depth_path )
         lidar_pc = process_ouster(lidar_pc)
+        visualize_point_cloud(lidar_pc)
         
         #visualize_point_clouds(lidar_pc, cam_pc)
-        transformation = align_point_clouds(lidar_pc, cam_pc)
+        transformation = align_point_clouds(lidar_pc, filtered_pc )
         transformations.append(transformation)
     
     avg_transformation = np.mean(transformations, axis=0)
