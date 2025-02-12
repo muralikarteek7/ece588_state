@@ -10,6 +10,9 @@ import os
 import json
 from datetime import datetime
 import rasterio
+from scipy.spatial import ConvexHull, distance
+
+
 
 bridge = CvBridge()
 
@@ -17,7 +20,7 @@ clicked_pixel = None
 
 
 # Constants
-MAX_DISTANCE_INCHES = 240  
+MAX_DISTANCE_INCHES = 255  
 MAX_DISTANCE_METERS = MAX_DISTANCE_INCHES * 0.0254  
 MIN_DISTANCE_INCHES = 200  
 MIN_DISTANCE_METERS = MIN_DISTANCE_INCHES * 0.0254  
@@ -59,6 +62,33 @@ P = Vt[-1].reshape(3, 4)  # Last row of Vt reshaped as 3x4 projection matrix
 
 print("Estimated Camera Projection Matrix (P):\n", P)
 
+
+def estimate_extrinsic(lidar_points, image_points, K):
+    """
+    Estimates the extrinsic matrix (R, t) from LiDAR 3D points to camera 2D points.
+
+    :param lidar_points: Nx3 numpy array of 3D points in LiDAR frame.
+    :param image_points: Nx2 numpy array of corresponding 2D points in the image.
+    :param K: 3x3 numpy array, camera intrinsic matrix.
+    :return: 4x4 numpy array, extrinsic matrix.
+    """
+    assert lidar_points.shape[0] == image_points.shape[0], "Number of points must match"
+
+    # Solve PnP (Estimate rotation and translation)
+    success, rvec, tvec = cv2.solvePnP(lidar_points, image_points, K, None)
+
+    if not success:
+        raise ValueError("PnP solution failed!")
+
+    # Convert rotation vector to rotation matrix
+    R, _ = cv2.Rodrigues(rvec)
+
+    # Construct 4x4 transformation matrix
+    T_cam_lidar = np.eye(4)
+    T_cam_lidar[:3, :3] = R
+    T_cam_lidar[:3, 3] = tvec.flatten()
+
+    return T_cam_lidar
 
 def project_lidar_to_image(P, lidar_points):
     """ Projects 3D LiDAR points to 2D image coordinates using projection matrix P. """
@@ -232,7 +262,112 @@ def overlay_lidar_on_image(image, lidar_points, P, color=(0, 0, 255)):
     return image
 
 
+import numpy as np
+import open3d as o3d
 
+def detect_plane_ransac(lidar_pc, distance_threshold=0.05, ransac_n=3, num_iterations=1000):
+    """
+    Detects a plane in the LiDAR point cloud using RANSAC.
+
+    :param lidar_pc: Nx3 numpy array of LiDAR points.
+    :param distance_threshold: Maximum distance for inliers.
+    :param ransac_n: Number of points to sample for plane fitting.
+    :param num_iterations: RANSAC iterations.
+    :return: Plane coefficients (a, b, c, d), inlier points, outlier points, and 2D bounding box corners.
+    """
+    # Convert to Open3D format
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(lidar_pc)
+
+    # RANSAC plane fitting
+    plane_model, inliers = pcd.segment_plane(distance_threshold, ransac_n, num_iterations)
+    a, b, c, d = plane_model
+
+    # Separate inlier (plane) and outlier points
+    inlier_cloud = pcd.select_by_index(inliers)
+    outlier_cloud = pcd.select_by_index(inliers, invert=True)
+
+    # Get 2D bounding box points
+    bounding_box_2d_points = get_plane_2d_bounding_box(np.asarray(inlier_cloud.points), plane_model)
+
+    return (a, b, c, d), inlier_cloud, outlier_cloud, bounding_box_2d_points
+
+
+def get_plane_2d_bounding_box(inlier_points, plane_model):
+    """
+    Computes the 2D bounding box of the detected plane by projecting points onto the plane.
+
+    :param inlier_points: Nx3 numpy array of points belonging to the plane.
+    :param plane_model: Plane coefficients (a, b, c, d).
+    :return: 4 corner points of the 2D bounding box projected onto the plane.
+    """
+    # Extract plane normal
+    a, b, c, d = plane_model
+    normal = np.array(plane_model[:3])
+    
+    # Find two orthogonal vectors on the plane
+    if np.allclose(normal[:2], 0):  # Handle edge case where normal is aligned with Z-axis
+        u = np.cross(normal, [1, 0, 0])
+    else:
+        u = np.cross(normal, [0, 0, 1])
+    
+    u /= np.linalg.norm(u)  # Normalize vector u
+    v = np.cross(normal, u)  # Compute second orthogonal vector
+    v /= np.linalg.norm(v)  # Normalize vector v
+
+    # Project points onto the local 2D coordinate system (u-v basis)
+    projected_points = np.dot(inlier_points, np.vstack([u, v]).T)
+
+    # Compute min and max bounds in this 2D space
+    min_bound = np.min(projected_points, axis=0)
+    max_bound = np.max(projected_points, axis=0)
+
+    # Define the corners of the bounding box in the 2D space
+    corners_2d = np.array([
+        [min_bound[0], min_bound[1]],
+        [max_bound[0], min_bound[1]],
+        [max_bound[0], max_bound[1]],
+        [min_bound[0], max_bound[1]]
+    ])
+
+    # Convert corners back to 3D space on the plane
+    corners_3d = []
+    for corner in corners_2d:
+        point_on_plane = corner[0] * u + corner[1] * v - d * normal / np.dot(normal, normal)
+        corners_3d.append(point_on_plane)
+    
+    return np.array(corners_3d)
+
+
+def visualize_plane(inlier_cloud, outlier_cloud, bounding_box_2d_points):
+    """
+    Visualizes the detected plane with its 2D bounding box.
+
+    :param inlier_cloud: Open3D point cloud containing plane points.
+    :param outlier_cloud: Open3D point cloud containing non-plane points.
+    :param bounding_box_2d_points: 4 corner points of the 2D bounding box on the plane.
+    """
+    inlier_cloud.paint_uniform_color([1, 0, 0])  # Red for the plane
+    outlier_cloud.paint_uniform_color([0.5, 0.5, 0.5])  # Gray for other points
+
+    # Create bounding box visualization
+    bounding_box_pcd = o3d.geometry.PointCloud()
+    bounding_box_pcd.points = o3d.utility.Vector3dVector(bounding_box_2d_points)
+    bounding_box_pcd.paint_uniform_color([0, 1, 0])  # Green for bounding box corners
+    
+    # Create a bounding box line set (connect corners)
+    lines = [
+        [0, 1], [1, 2], [2, 3], [3, 0]   # Edges of the rectangle
+    ]
+    
+    bounding_box_lines = o3d.geometry.LineSet()
+    bounding_box_lines.points = o3d.utility.Vector3dVector(bounding_box_2d_points)
+    bounding_box_lines.lines = o3d.utility.Vector2iVector(lines)
+    
+    bounding_box_lines.paint_uniform_color([0, 1, 0])  # Green for bounding box edges
+    
+    # Visualize
+    o3d.visualization.draw_geometries([inlier_cloud, outlier_cloud, bounding_box_pcd, bounding_box_lines])
 
 def main():
     rospy.init_node('icp_lidar_camera_calibration')
@@ -253,46 +388,21 @@ def main():
 
         color_img = cv2.imread(color_path, cv2.IMREAD_UNCHANGED)
         mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        #depth_img = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
-        #cam_pc = depth_to_point_cloud(color_img, camera_info_msg)
-
-        #filtered_pc = filter_point_cloud(cam_pc, MIN_DISTANCE_METERS-0.5, MAX_DISTANCE_METERS + 0.5)
 
         data = np.load(lidar_path)
         lidar_pc = data['arr_0']
         lidar_pc = process_ouster(lidar_pc)
+
+        plane_eq, inlier_cloud, outlier_cloud, bounding_box_points = detect_plane_ransac(lidar_pc)
+        visualize_plane(inlier_cloud, outlier_cloud, bounding_box_points)
+        print(bounding_box_points)
+
         output_image = overlay_lidar_on_image(color_img, lidar_pc, P)
         cv2.imshow("LiDAR Projection", output_image)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 
         
-        #visualize_point_cloud(cam_pc)
-
-        #cam_pc2 = process_oak(depth_path, camera_model)
-        
-        #pick_points(lidar_pc)
-
-       
-        #visualize_point_cloud(cam_pc2)
-        #visualize_point_clouds(lidar_pc, cam_pc2)
-        
-        #visualize_point_clouds(lidar_pc, cam_pc)
-        #transformation = align_point_clouds(lidar_pc, filtered_pc )
-        #transformations.append(transformation)
-    """
-    avg_transformation = np.mean(transformations, axis=0)
-    print("Average Transformation Matrix:\n", avg_transformation)
-    
-    # Save to JSON file
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    output_path = f"icp_transformation_ouster_2_oak_{timestamp}.json"
-    with open(output_path, "w") as f:
-        json.dump({"timestamp": timestamp, "average_transformation": avg_transformation.tolist()}, f, indent=4)
-    
-    rospy.loginfo("ICP Calibration Done. Results saved in %s", output_path)
-    return avg_transformation
-    """
 
 if __name__ == "__main__":
     main()
